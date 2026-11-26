@@ -1,0 +1,112 @@
+"""Genera la guía para estudiantes a partir del notebook resuelto.
+
+La fuente única de cada módulo es resuelto.ipynb. Sus celdas pueden llevar
+etiquetas (en VS Code, con la extensión Jupyter Cell Tags; en Jupyter, Ver → Etiquetas de celda) que indican qué hacer
+con ellas en la guía:
+
+  solo-docente    se elimina (prompts de referencia, notas para docentes)
+  solucion        se reemplaza por un espacio para anotar el prompt y una celda vacía
+  interpretacion  se reemplaza por un espacio "Tu interpretación"; si el resuelto lo
+                  pide (ver abajo), debajo se agregan las conclusiones del resuelto
+                  en un bloque plegado, para quien necesite verlas
+
+Las celdas sin etiqueta pasan igual, salvo los tiempos estimados de los títulos
+(por ejemplo "(25 min)"), que son para el docente y se quitan en la guía.
+
+Para mostrar las conclusiones plegadas, el resuelto lleva en sus metadatos
+(Notebook → metadatos, o editando el JSON):
+
+  "guia": {"conclusiones_plegadas": true}
+
+Uso:
+
+  python herramientas/crear_guia.py modulo-7/resuelto.ipynb modulo-7/guia.ipynb
+"""
+import re
+import sys
+
+import nbformat
+
+TEXTO_RESUELTO = "**Versión resuelta para docentes.**"
+TEXTO_GUIA = "**Guía para estudiantes.**"
+
+# Tiempo estimado al final de un título, por ejemplo " (25 min)"
+PATRON_TIEMPO = re.compile(r" \(\d+ min\)$", re.MULTILINE)
+
+
+def etiquetas(celda):
+    return celda.metadata.get("tags", [])
+
+
+def celda_tu_prompt():
+    return nbformat.v4.new_markdown_cell("**Tu prompt:**\n\n*...*")
+
+
+def celda_codigo_vacia():
+    return nbformat.v4.new_code_cell("# Pegá o escribí aquí el código que generó el asistente\n")
+
+
+def celda_tu_interpretacion():
+    return nbformat.v4.new_markdown_cell("#### Tu interpretación\n\n*...*")
+
+
+# Título de la celda de interpretación del resuelto, que no se repite dentro del bloque plegado
+PATRON_TITULO_INTERPRETACION = re.compile(r"^#+ Interpretación\s*\n", re.MULTILINE)
+
+
+def celda_conclusiones_plegadas(celda_interpretacion):
+    """Las conclusiones del resuelto, plegadas para que se abran solo si hace falta."""
+    conclusiones = PATRON_TITULO_INTERPRETACION.sub("", celda_interpretacion.source, count=1).strip()
+    return nbformat.v4.new_markdown_cell(
+        "<details>\n<summary><b>¿Querés comparar con las conclusiones?</b> (clic para verlas)</summary>\n\n"
+        "Escribí primero tu interpretación; después abrí este bloque para comparar.\n\n"
+        f"{conclusiones}\n\n</details>"
+    )
+
+
+def crear_guia(ruta_resuelto, ruta_guia):
+    resuelto = nbformat.read(ruta_resuelto, as_version=4)
+    conclusiones_plegadas = resuelto.metadata.get("guia", {}).get("conclusiones_plegadas", False)
+    celdas_guia = []
+
+    for celda in resuelto.cells:
+        marcas = etiquetas(celda)
+        if "solo-docente" in marcas:
+            continue
+        if "solucion" in marcas:
+            celdas_guia.append(celda_tu_prompt())
+            celdas_guia.append(celda_codigo_vacia())
+            continue
+        if "interpretacion" in marcas:
+            celdas_guia.append(celda_tu_interpretacion())
+            if conclusiones_plegadas:
+                celdas_guia.append(celda_conclusiones_plegadas(celda))
+            continue
+
+        # Celda sin etiqueta: se copia sin salidas, para que la guía empiece limpia
+        copia = nbformat.from_dict(celda)
+        if copia.cell_type == "code":
+            copia.outputs = []
+            copia.execution_count = None
+        else:
+            copia.source = PATRON_TIEMPO.sub("", copia.source)
+        celdas_guia.append(copia)
+
+    # La portada del resuelto dice que es la versión docente; en la guía se cambia
+    portada = celdas_guia[0]
+    if TEXTO_RESUELTO not in portada.source:
+        sys.exit(f"No se encontró '{TEXTO_RESUELTO}' en la primera celda del resuelto.")
+    portada.source = portada.source.replace(TEXTO_RESUELTO, TEXTO_GUIA)
+
+    metadatos = dict(resuelto.metadata)
+    metadatos.pop("guia", None)  # la opción es para generar la guía, no hace falta dentro de ella
+    guia = nbformat.v4.new_notebook(metadata=metadatos)
+    guia.cells = celdas_guia
+    nbformat.write(guia, ruta_guia)
+    print(f"Guía escrita en {ruta_guia}: {len(celdas_guia)} celdas (resuelto: {len(resuelto.cells)})")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        sys.exit("Uso: python herramientas/crear_guia.py <resuelto.ipynb> <guia.ipynb>")
+    crear_guia(sys.argv[1], sys.argv[2])
